@@ -29,6 +29,8 @@ import {
 @Injectable()
 export class StrategyService {
   private readonly logger = new Logger(StrategyService.name);
+  private readonly strategyObjectCache = new Map<string, Strategy>();
+  private readonly deviceStrategyCache = new Map<string, string | null>();
 
   constructor(
     @InjectRepository(Strategy)
@@ -97,6 +99,7 @@ export class StrategyService {
     }
 
     await this.strategyRepository.save(strategy);
+    this.strategyObjectCache.set(guid, strategy);
 
     const configOptions: Record<string, string> = dto.config_options
       ? dto.config_options
@@ -120,6 +123,12 @@ export class StrategyService {
     }
 
     await this.strategyRepository.remove(strategy);
+    this.strategyObjectCache.delete(guid);
+    for (const [uuid, sGuid] of this.deviceStrategyCache) {
+      if (sGuid === guid) {
+        this.deviceStrategyCache.delete(uuid);
+      }
+    }
   }
 
   async getStrategies(query: StrategyQueryDto) {
@@ -390,6 +399,7 @@ export class StrategyService {
         );
     }
 
+    this.invalidateDeviceStrategyCache();
     return { success, errors };
   }
 
@@ -568,6 +578,7 @@ export class StrategyService {
         );
     }
 
+    this.invalidateDeviceStrategyCache();
     return { success, errors };
   }
 
@@ -732,6 +743,29 @@ export class StrategyService {
       return null;
     }
 
+    return this.findStrategyForPeer(peer);
+  }
+
+  async findStrategyForPeer(peer: Peer): Promise<Strategy | null> {
+    const cachedGuid = this.deviceStrategyCache.get(peer.uuid);
+    if (cachedGuid !== undefined) {
+      if (cachedGuid === null) return null;
+      const strategy = this.strategyObjectCache.get(cachedGuid);
+      if (strategy) return strategy;
+    }
+
+    const result = await this.resolveStrategyForPeer(peer);
+
+    if (result) {
+      this.strategyObjectCache.set(result.guid, result);
+      this.deviceStrategyCache.set(peer.uuid, result.guid);
+    } else {
+      this.deviceStrategyCache.set(peer.uuid, null);
+    }
+    return result;
+  }
+
+  private async resolveStrategyForPeer(peer: Peer): Promise<Strategy | null> {
     if (peer.strategyGuid) {
       const strategy = await this.strategyRepository.findOne({
         where: { guid: peer.strategyGuid },
@@ -770,5 +804,13 @@ export class StrategyService {
     }
 
     return null;
+  }
+
+  invalidateDeviceStrategyCache(deviceUuid?: string): void {
+    if (deviceUuid) {
+      this.deviceStrategyCache.delete(deviceUuid);
+    } else {
+      this.deviceStrategyCache.clear();
+    }
   }
 }
