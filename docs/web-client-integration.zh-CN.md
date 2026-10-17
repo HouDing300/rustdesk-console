@@ -4,23 +4,23 @@
 
 ## 配置
 
-功能默认关闭。启用时需要完整填写以下环境变量：
+功能默认关闭。配置存储在 Console 数据库中，由超级管理员登录后在 **设置 -> Web 客户端** 页面管理；保存后立即生效，无需重启。需要填写的字段：
 
-```dotenv
-WEB_CLIENT_ENABLED=true
-WEB_CLIENT_ALLOWED_ORIGIN=https://console.example.com
-WEB_CLIENT_ID_SERVER_URL=wss://console.example.com/ws/id
-WEB_CLIENT_RELAY_SERVER_URL=wss://console.example.com/ws/relay
-WEB_CLIENT_SERVER_PUBLIC_KEY=填写原有RustDesk服务端公钥
-WEB_CLIENT_ID_UPSTREAM_URL=ws://rustdesk-hbbs:21118
-WEB_CLIENT_RELAY_UPSTREAM_URL=ws://rustdesk-hbbr:21119
-```
+| 设置字段 | 说明 |
+| --- | --- |
+| 启用开关 | 开启后其余字段必须完整且有效 |
+| 允许的来源 | 浏览器实际使用的完整 HTTPS origin |
+| 公开 ID 服务器地址 | 对外发布的 `wss://` WebSocket 地址 |
+| 公开中继服务器地址 | 对外发布的 `wss://` WebSocket 地址 |
+| 服务器公钥 | hbbs/hbbr 生成的 base64 公钥（`id_ed25519.pub`） |
+| 内部 ID 上游（可选） | 网关代理的容器网络上游，留空使用公开地址 |
+| 内部中继上游（可选） | 网关代理的容器网络上游，留空使用公开地址 |
 
-`WEB_CLIENT_ALLOWED_ORIGIN` 必须是浏览器实际使用的完整 HTTPS origin，包含非默认端口，不带末尾斜杠或路径。例如 IP 部署可填写 `https://203.0.113.10:22443`（示例地址，部署时替换）。不能从请求的 Host 或代理头自动推断该值。
+允许的来源必须是浏览器实际使用的完整 HTTPS origin，包含非默认端口，不带末尾斜杠或路径。例如 IP 部署可填写 `https://203.0.113.10:22443`（示例地址，部署时替换）。不能从请求的 Host 或代理头自动推断该值。
 
-两个 `UPSTREAM_URL` 仅由后端读取，用来指定容器网络中的固定上游；省略时使用对应的公开 WSS 地址。公开地址仍用于原有客户端配置、公钥和记住密码的服务器身份绑定。请求体、浏览器收到的服务器广告均不能指定网关上游。
+两个内部上游字段仅由后端使用，用来指定容器网络中的固定上游；留空时使用对应的公开 WSS 地址。公开地址仍用于原有客户端配置、公钥和记住密码的服务器身份绑定。请求体、浏览器收到的服务器广告均不能指定网关上游。
 
-反向代理须将 `/api/web-client/socket` 的 WebSocket Upgrade 转发到 Console，并允许长连接。原生 TCP/UDP 端口和服务器密钥继续保留，但不能继续允许普通浏览器通过原有公开 `/ws/id`、`/ws/relay` 直通服务器，绕过 Console 授权。部署时须处理这些路径和裸 WS 端口的浏览器旁路，具体示例与兼容边界见 [网关部署说明](../deploy/web-client-gateway/README.zh-CN.md)。仅新增环境变量并不能替代反向代理配置。
+反向代理须将 `/api/web-client/socket` 的 WebSocket Upgrade 转发到 Console，并允许长连接。原生 TCP/UDP 端口和服务器密钥继续保留，但不能继续允许普通浏览器通过原有公开 `/ws/id`、`/ws/relay` 直通服务器，绕过 Console 授权。部署时须处理这些路径和裸 WS 端口的浏览器旁路，具体示例与兼容边界见 [网关部署说明](../deploy/web-client-gateway/README.zh-CN.md)。仅完成设置表单并不能替代反向代理配置。
 
 配套前端的 Docker Nginx 已包含受控网关的精确路由。官方原生前端二进制当前只代理普通 HTTP，没有实现 WebSocket Upgrade；使用该二进制时，前置 HTTPS 反向代理必须将 `/api/web-client/socket` 直接转到 Console 后端，保留原始 `Origin`。不能先交给原生前端的 `/api/` 通用代理，也不能改为直通 hbbs/hbbr。此要求仅涉及部署入口，不需要改动原生 RustDesk 客户端或服务端。
 

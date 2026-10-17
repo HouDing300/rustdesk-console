@@ -4,7 +4,8 @@ import {
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import type { ServerManagementRuntimeConfig } from './server-management-settings.service';
+import { ServerManagementSettingsService } from './server-management-settings.service';
 
 // Aggregated event kinds published by the hbbs management API.
 export type ServerEventKind =
@@ -35,6 +36,7 @@ const SSE_BUFFER_LIMIT = 1024 * 1024;
 const FRESH_WINDOW_MS = 45_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
+const UNCONFIGURED_POLL_MS = 30_000;
 
 // Extracts complete `event:`/`data:` frames from a raw SSE chunk. The caller
 // keeps the returned remainder for the next chunk; comments and unknown
@@ -92,13 +94,16 @@ export function extractServerEvents(
 }
 
 // Consumes the aggregated hbbs event stream and maintains a live view of the
-// registered relays and their sessions. Falls back to nothing when disabled;
+// registered relays and their sessions. The connection settings live in the
+// database; the loop re-reads them on every (re)connect, so settings updates
+// take effect without a restart. Falls back to nothing when disabled;
 // readers always have an HTTP fallback when the stream is not fresh.
 @Injectable()
 export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ServerEventsService.name);
-  private readonly url?: string;
-  private readonly token: string;
+  private url?: string;
+  private token = '';
+  private restartRequested = false;
   private readonly relays = new Map<string, RelayPresence>();
   private readonly sessions = new Map<string, LiveSession>();
   private stopping = false;
@@ -106,39 +111,30 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
   private lastKeepAliveAt = 0;
   private runTask?: Promise<void>;
   private activeReader?: ReadableStreamDefaultReader<Uint8Array>;
+  private baselineAbort?: AbortController;
   private wake?: () => void;
 
-  constructor(config: ConfigService) {
-    const raw = config.get<string>('HBBS_MANAGEMENT_URL');
-    if (raw) {
-      try {
-        const url = new URL(raw);
-        if (
-          ['http:', 'https:'].includes(url.protocol) &&
-          !url.username &&
-          !url.password &&
-          !url.search &&
-          !url.hash &&
-          (url.pathname === '/' || url.pathname === '')
-        )
-          this.url = url.origin;
-      } catch {
-        // ServerManagementService reports the invalid configuration.
-      }
-    }
-    this.token = config.get<string>('SERVER_MANAGEMENT_TOKEN') || '';
-  }
+  constructor(private readonly settings: ServerManagementSettingsService) {}
 
   onModuleInit(): void {
-    if (!this.url || this.token.length < 32) return;
     this.runTask = this.run();
   }
 
   async onModuleDestroy(): Promise<void> {
     this.stopping = true;
     this.wake?.();
+    this.baselineAbort?.abort();
     await this.activeReader?.cancel().catch(() => {});
     await this.runTask?.catch(() => {});
+  }
+
+  // Interrupts the current connection (if any) and reconnects immediately
+  // with fresh settings; called after every settings update.
+  restart(): void {
+    this.restartRequested = true;
+    this.wake?.();
+    this.baselineAbort?.abort();
+    void this.activeReader?.cancel().catch(() => {});
   }
 
   // The live view is only served while the stream is actually delivering:
@@ -206,9 +202,40 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
     this.lastEventAt = Date.now();
   }
 
+  private async loadConnection(): Promise<{
+    url: string;
+    token: string;
+  } | null> {
+    let config: ServerManagementRuntimeConfig;
+    try {
+      config = await this.settings.getActiveConfig();
+    } catch (error) {
+      this.logger.warn(
+        `Unable to load server management settings: ${String(error)}`,
+      );
+      return null;
+    }
+    if (!config.url || config.token.length < 32) {
+      this.url = undefined;
+      return null;
+    }
+    return { url: config.url, token: config.token };
+  }
+
   private async run(): Promise<void> {
     let backoff = RECONNECT_BASE_MS;
     while (!this.stopping) {
+      // Entering a new iteration re-reads the settings and reconnects, so
+      // restart requests from the previous iteration are already served.
+      this.restartRequested = false;
+      const connection = await this.loadConnection();
+      if (!connection) {
+        // Settings are absent or incomplete; poll until they appear.
+        if (!this.stopping) await this.sleep(UNCONFIGURED_POLL_MS);
+        continue;
+      }
+      this.url = connection.url;
+      this.token = connection.token;
       try {
         await this.follow();
         backoff = RECONNECT_BASE_MS;
@@ -223,8 +250,15 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
       this.lastEventAt = 0;
       this.lastKeepAliveAt = 0;
       if (this.stopping) return;
+      if (this.restartRequested) {
+        this.restartRequested = false;
+        backoff = 0;
+      }
       await this.sleep(backoff);
-      backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+      backoff =
+        backoff === 0
+          ? RECONNECT_BASE_MS
+          : Math.min(backoff * 2, RECONNECT_MAX_MS);
     }
   }
 
@@ -256,15 +290,22 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
     // connection, including baseline failures and read errors.
     const reader = response.body.getReader();
     this.activeReader = reader;
+    // Baseline requests are aborted on restart/shutdown so the loop never
+    // keeps issuing requests with a stale URL and token.
+    const baselineAbort = new AbortController();
+    this.baselineAbort = baselineAbort;
     try {
+      // A restart that arrived while the response was pending must not run
+      // the baseline with the stale URL and token.
+      if (this.restartRequested) return;
       // Reconnect on a fresh baseline: hbbs may have restarted and replayed
       // nothing while this connection was down.
-      await this.refreshBaseline();
+      await this.refreshBaseline(baselineAbort.signal);
       this.lastKeepAliveAt = Date.now();
       const decoder = new TextDecoder();
       let pending = '';
       for (;;) {
-        if (this.stopping) return;
+        if (this.stopping || this.restartRequested) return;
         const { done, value } = await this.readWithDeadline(reader);
         if (done) return;
         // Any delivered bytes keep the stream fresh, including keep-alive
@@ -278,6 +319,7 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
         for (const event of events) this.applyEvent(event);
       }
     } finally {
+      this.baselineAbort = undefined;
       this.activeReader = undefined;
       await reader.cancel().catch(() => {});
     }
@@ -301,8 +343,8 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async refreshBaseline(): Promise<void> {
-    const relays = (await this.fetchJson('/v1/relays')) as {
+  private async refreshBaseline(signal: AbortSignal): Promise<void> {
+    const relays = (await this.fetchJson('/v1/relays', signal)) as {
       data?: Array<{ id?: unknown }>;
     };
     this.relays.clear();
@@ -312,6 +354,7 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
       this.relays.set(relay.id, { id: relay.id });
       const sessions = (await this.fetchJson(
         `/v1/relays/${encodeURIComponent(relay.id)}/sessions`,
+        signal,
       )) as { data?: unknown[] };
       for (const info of Array.isArray(sessions?.data) ? sessions.data : [])
         if (
@@ -326,11 +369,11 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async fetchJson(path: string): Promise<unknown> {
+  private async fetchJson(path: string, signal: AbortSignal): Promise<unknown> {
     const response = await fetch(`${this.url}${path}`, {
       redirect: 'error',
       headers: { authorization: `Bearer ${this.token}` },
-      signal: AbortSignal.timeout(10_000),
+      signal: combineAbortSignals([signal, AbortSignal.timeout(10_000)]),
     });
     if (!response.ok) {
       await response.body?.cancel();
@@ -338,4 +381,19 @@ export class ServerEventsService implements OnModuleInit, OnModuleDestroy {
     }
     return (await response.json()) as unknown;
   }
+}
+
+// Combines abort signals without AbortSignal.any, which needs a newer
+// runtime than the engines field guarantees.
+function combineAbortSignals(signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abort();
+      break;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+  }
+  return controller.signal;
 }
