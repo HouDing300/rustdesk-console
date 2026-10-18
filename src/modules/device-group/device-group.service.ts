@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -23,6 +24,10 @@ import type { PermissionScope } from '../rbac/services/rbac-authorization.servic
 import { UserRoleAssignmentDeviceGroup } from '../rbac/entities/user-role-assignment-device-group.entity';
 import { RbacAuthorizationService } from '../rbac/services/rbac-authorization.service';
 import { StrategyService } from '../strategy/strategy.service';
+import {
+  ServerManagementService,
+  type DeviceBanSyncResult,
+} from '../server-management/server-management.service';
 
 @Injectable()
 /**
@@ -55,7 +60,26 @@ export class DeviceGroupService {
     private readonly dataSource: DataSource,
     private readonly rbacAuthorizationService: RbacAuthorizationService,
     private readonly strategyService: StrategyService,
+    private readonly serverManagement: ServerManagementService,
   ) {}
+
+  // Protocol-level enforcement writes the hbbs ban policy, which is guarded
+  // by the server management permission; without it the database flag alone
+  // only restricts web remote control. Only an authorization denial means
+  // "no permission"; anything else (e.g. a failing permission lookup) is an
+  // error the caller reports instead of a silent skip.
+  private async canEnforceProtocolBans(actorGuid: string): Promise<boolean> {
+    try {
+      await this.rbacAuthorizationService.requirePermission(
+        actorGuid,
+        'servers.ban',
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof ForbiddenException) return false;
+      throw error;
+    }
+  }
 
   /**
    * Get the list of device groups accessible to a user (paginated)
@@ -895,13 +919,51 @@ export class DeviceGroupService {
       succeeded.push(...guidsToUpdate);
     }
 
+    // Reflect the status change in the hbbs admission policy so native
+    // clients are blocked too; a database flag alone only restricts the web
+    // client. Best effort: the committed database state stays authoritative
+    // and the result reports whether the protocol layer followed.
+    let protocolEnforcement: DeviceBanSyncResult | undefined;
+    if (guidsToUpdate.length > 0) {
+      const deviceIds = existingPeers
+        .filter((peer) => guidsToUpdate.includes(peer.uuid) && peer.id)
+        .map((peer) => peer.id)
+        .filter((id, index, all) => all.indexOf(id) === index);
+      if (deviceIds.length > 0) {
+        protocolEnforcement = await this.syncDeviceBans(
+          actorGuid,
+          status === DeviceStatus.DISABLED
+            ? { add: deviceIds }
+            : { remove: deviceIds },
+        );
+      }
+    }
+
     return {
       succeeded,
       failed,
       total: uniqueGuids.length,
       succeededCount: succeeded.length,
       failedCount: failed.length,
+      ...(protocolEnforcement ? { protocolEnforcement } : {}),
     };
+  }
+
+  private async syncDeviceBans(
+    actorGuid: string,
+    changes: { add?: string[]; remove?: string[] },
+  ): Promise<DeviceBanSyncResult> {
+    try {
+      if (!(await this.canEnforceProtocolBans(actorGuid)))
+        return { enforced: false, reason: 'forbidden' };
+    } catch (error) {
+      return {
+        enforced: false,
+        reason: 'upstream_error',
+        detail: `Failed to verify the servers.ban permission: ${String(error)}`,
+      };
+    }
+    return this.serverManagement.syncDeviceBans(actorGuid, changes);
   }
 
   /**
