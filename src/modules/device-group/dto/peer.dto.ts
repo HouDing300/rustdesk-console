@@ -39,4 +39,16 @@ export class PeerQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsString()
   os?: string; // filter by operating system (fuzzy match)
+
+  @IsOptional()
+  @IsString()
+  device_name?: string; // filter by device name / hostname (fuzzy match)
+
+  @IsOptional()
+  @IsString()
+  device_username?: string; // filter by the account logged into the device (fuzzy match)
+
+  @IsOptional()
+  @IsString()
+  ip?: string; // filter by last connection IP (fuzzy match)
 }

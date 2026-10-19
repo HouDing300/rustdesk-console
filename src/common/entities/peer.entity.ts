@@ -113,6 +113,14 @@ export class Peer {
   lastHeartbeat: Date | null;
 
   /**
+   * Last connection IP
+   * Source IP address observed the last time the device contacted the console
+   * (resolved from X-Forwarded-For / X-Real-IP when behind the web proxy).
+   */
+  @Column({ type: 'varchar', length: 45, nullable: true })
+  lastIp: string | null;
+
+  /**
    * Update time
    */
   @UpdateDateColumn()

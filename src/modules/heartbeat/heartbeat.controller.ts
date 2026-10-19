@@ -1,4 +1,5 @@
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Post, Body, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { HeartbeatService } from './heartbeat.service';
 import { HeartbeatDto } from './dto/heartbeat.dto';
@@ -36,7 +37,32 @@ export class HeartbeatController {
   @Public()
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post()
-  receiveHeartbeat(@Body() HeartbeatDto: HeartbeatDto) {
-    return this.HeartbeatService.handleHeartbeat(HeartbeatDto);
+  receiveHeartbeat(@Body() HeartbeatDto: HeartbeatDto, @Req() req: Request) {
+    return this.HeartbeatService.handleHeartbeat(
+      HeartbeatDto,
+      this.resolveClientIp(req),
+    );
+  }
+
+  /**
+   * Resolve the device source IP.
+   * The console normally sits behind the web container's nginx proxy, so the
+   * forwarded headers are preferred over the raw socket address.
+   */
+  private resolveClientIp(req: Request): string {
+    const forwarded = req.headers['x-forwarded-for'];
+    const firstForwarded = Array.isArray(forwarded)
+      ? forwarded[0]
+      : typeof forwarded === 'string'
+        ? forwarded
+        : '';
+    const candidate =
+      firstForwarded.split(',')[0]?.trim() ||
+      (req.headers['x-real-ip'] as string | undefined)?.trim() ||
+      req.ip ||
+      '';
+    // Keep IPv6-mapped IPv4 addresses readable and cap the stored length.
+    const normalized = candidate.replace(/^::ffff:/, '');
+    return normalized.slice(0, 45);
   }
 }

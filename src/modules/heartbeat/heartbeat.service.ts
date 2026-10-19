@@ -25,7 +25,8 @@ export class HeartbeatService {
     private heartbeatCacheService: HeartbeatCacheService,
   ) {}
 
-  async handleHeartbeat(data: HeartbeatDto) {
+  async handleHeartbeat(data: HeartbeatDto, clientIp?: string) {
+    const lastIp = clientIp || undefined;
     this.logger.debug(
       `Received heartbeat data: id=${data.id}, uuid=${data.uuid}`,
     );
@@ -40,6 +41,7 @@ export class HeartbeatService {
         ver: data.ver,
         modifiedAt: data.modified_at,
         lastHeartbeat: new Date(),
+        lastIp,
       });
       this.logger.debug(`Device ${data.uuid} heartbeat updated`);
     } else {
@@ -58,6 +60,7 @@ export class HeartbeatService {
         ver: data.ver,
         modifiedAt: data.modified_at,
         lastHeartbeat: new Date(),
+        lastIp,
       });
       await this.peerRepository.save(peer);
       this.logger.log(`New device ${data.uuid} registered`);

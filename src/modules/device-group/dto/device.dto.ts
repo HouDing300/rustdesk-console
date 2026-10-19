@@ -34,6 +34,10 @@ export class DeviceQueryDto extends PaginationQueryDto {
 
   @IsString()
   @IsOptional()
+  ip?: string;
+
+  @IsString()
+  @IsOptional()
   os?: string;
 
   @IsString()

@@ -512,6 +512,7 @@ export class DeviceGroupService {
       device_name?: string;
       user_name?: string;
       device_username?: string;
+      ip?: string;
       os?: string;
       device_group_name?: string;
       device_group_guid?: string;
@@ -529,6 +530,7 @@ export class DeviceGroupService {
       device_name,
       user_name,
       device_username,
+      ip,
       os,
       device_group_name,
       device_group_guid,
@@ -551,6 +553,7 @@ export class DeviceGroupService {
         'peer.ver',
         'peer.modifiedAt',
         'peer.lastHeartbeat',
+        'peer.lastIp',
         'peer.updatedAt',
         'dg.name',
       ]);
@@ -638,6 +641,13 @@ export class DeviceGroupService {
         )`,
         { deviceUsername: `%${device_username}%` },
       );
+    }
+
+    // Filter by last connection IP
+    if (ip) {
+      queryBuilder = queryBuilder.andWhere('peer.lastIp LIKE :peerLastIp', {
+        peerLastIp: `%${ip}%`,
+      });
     }
 
     // Filter by device group name (exact match)
@@ -747,7 +757,7 @@ export class DeviceGroupService {
           version: formatVersion(peer.ver),
           cpu: sysinfo?.cpu || '',
           memory: sysinfo?.memory || '',
-          ip: '',
+          ip: peer.lastIp || '',
         },
       };
     });

@@ -12,6 +12,7 @@ interface BufferedPeerUpdate {
   id: string;
   ver: number;
   modifiedAt: number;
+  lastIp?: string;
 }
 
 /**
@@ -84,7 +85,13 @@ export class HeartbeatCacheService implements OnModuleDestroy {
       try {
         await this.dataSource.transaction(async (manager) => {
           for (const [uuid, update] of peerSnapshot) {
-            await manager.update(Peer, { uuid }, update);
+            // Drop an unknown IP instead of overwriting the stored one with NULL.
+            const { lastIp, ...baseUpdate } = update;
+            await manager.update(
+              Peer,
+              { uuid },
+              lastIp === undefined ? baseUpdate : { ...baseUpdate, lastIp },
+            );
           }
           for (const [uuid, conns] of connsSnapshot) {
             const peer = await manager.findOne(Peer, {

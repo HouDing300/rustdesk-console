@@ -69,6 +69,9 @@ export class PeerService {
       device_group_guid,
       device_group_name,
       os,
+      device_name,
+      device_username,
+      ip,
     } = query;
     const skip = (current - 1) * pageSize;
 
@@ -174,6 +177,35 @@ export class PeerService {
       );
     }
 
+    // Filter by device name / hostname (fuzzy match)
+    if (device_name) {
+      queryBuilder.andWhere(
+        `EXISTS (
+          SELECT 1 FROM sysinfos si
+          WHERE si.uuid = peer.uuid AND si.hostname LIKE :deviceName
+        )`,
+        { deviceName: `%${device_name}%` },
+      );
+    }
+
+    // Filter by the account logged into the device (fuzzy match)
+    if (device_username) {
+      queryBuilder.andWhere(
+        `EXISTS (
+          SELECT 1 FROM sysinfos si
+          WHERE si.uuid = peer.uuid AND si.username LIKE :deviceUsername
+        )`,
+        { deviceUsername: `%${device_username}%` },
+      );
+    }
+
+    // Filter by last connection IP (fuzzy match)
+    if (ip) {
+      queryBuilder.andWhere('peer.lastIp LIKE :peerLastIp', {
+        peerLastIp: `%${ip}%`,
+      });
+    }
+
     // Paginated query
     queryBuilder.orderBy('peer.id', 'ASC').skip(skip).take(pageSize);
 
@@ -261,7 +293,7 @@ export class PeerService {
           version: formatVersion(peer.ver),
           cpu: sysinfo?.cpu || '',
           memory: sysinfo?.memory || '',
-          ip: '',
+          ip: peer.lastIp || '',
         },
       };
     });
